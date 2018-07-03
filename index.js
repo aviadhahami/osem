@@ -4,52 +4,55 @@ const path = require('path');
 const db = path.resolve('./db.json');
 
 
-const MAX = 100000000000; // (10^11)
-const INCREMENT_CONSTANT = 200;
-const URL = 'https://www.osem.co.il/tasterschoice/api/0/codes/TC';
-const generateURL = code => `${URL}${code}`;
+const MAX = 50000000000; // (10^11) / 2
+const INCREMENT_CONSTANT = 200; // How many async tasks at a time
+const WORKERS_COUNT = 20; // How many workers
+const WORKER_SEGMENT_SIZE = 2000; // How many numbers will the worker try
+const LAMBDA_URL = 'https://us-central1-osem-209109.cloudfunctions.net/osem-worker';
+
 let winners = [];
+let asyncWorkers = [];
 
-
-const task = async (code) =>{
-	const paddedCode = code.toString().padStart(11, '0');
-	const url = generateURL(paddedCode);
-	try{
-		await axios.get(url);
-		winners.push(paddedCode);
-		console.log(`Winner! - ${paddedCode}`);
-	}catch({response}){
-		// console.log(`${paddedCode} - ${response.status}`);
-	}
-};
+async function invokeWorker(...args){
+	const { data } = await axios.post(LAMBDA_URL,{ ...args });
+	return data;
+}
 
 async function run(){
 	const { count } = require(db);
 	
-	let asyncTasks = [];
-// Brute
-	for(let j = count; j < MAX; j += INCREMENT_CONSTANT){
-		// Generate requests
-		for(let i = 0; i < INCREMENT_CONSTANT; i++){
-			asyncTasks.push(task(j + i));
+	// For each number we have, increment i by the amount of workers times their segment in range
+	for(let i = count; i <= MAX; i+= WORKERS_COUNT * WORKER_SEGMENT_SIZE ){
+		
+		// Prepare async call for each worker
+		let FROM, TO;
+		for(let workerIndex = 0; workerIndex <= WORKERS_COUNT; workerIndex++){
+			FROM = i + WORKER_SEGMENT_SIZE * workerIndex;
+			TO = FROM + WORKER_SEGMENT_SIZE;
+			asyncWorkers.push(
+					invokeWorker({
+						FROM,
+						TO,
+						INCREMENT_CONSTANT
+					})
+			);
 		}
-		await Promise.all(asyncTasks);
 		
-		// Clear tasks
-		asyncTasks = [];
+		// Exec workers calls
+		const [...rest] = await Promise.all(asyncWorkers);
+		console.log(rest);
 		
-		// Fetch winners
-		const { winners: fileWinners = [] } = require(db);
+		// Dump results to DB
 		
-		// Update winners
-		// Update count
-		const newFile = {
-			count: j + INCREMENT_CONSTANT,
-			winners: [].concat(fileWinners).concat(winners)
-		};
-		
-		await fs.writeFileSync(db, JSON.stringify(newFile));
-		console.log(`Dumped! count - ${j + INCREMENT_CONSTANT}`);
+		// const { winners: fileWinners } = require(db);
+		// const newFile = {
+		// 	count: i + WORKERS_COUNT * WORKER_SEGMENT_SIZE,
+		// 	winners: [].concat(fileWinners).concat(winners)
+		// };
+		//
+		// await fs.writeFileSync(db, JSON.stringify(newFile));
+		// console.log(`Dumped! count - ${i + WORKERS_COUNT * WORKER_SEGMENT_SIZE}`);
 	}
 }
+
 run();
